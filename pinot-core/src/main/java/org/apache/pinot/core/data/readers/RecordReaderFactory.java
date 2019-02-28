@@ -43,6 +43,7 @@ public class RecordReaderFactory {
         return new CSVRecordReader(dataFile, schema, (CSVRecordReaderConfig) segmentGeneratorConfig.getReaderConfig());
       case JSON:
         return new JSONRecordReader(dataFile, schema);
+      // TODO: PinotSegmentRecordReader abd ThriftRecordReader do not support default value or different incoming/outgoing time column
       case PINOT:
         return new PinotSegmentRecordReader(dataFile, schema, segmentGeneratorConfig.getColumnSortOrder());
       case THRIFT:

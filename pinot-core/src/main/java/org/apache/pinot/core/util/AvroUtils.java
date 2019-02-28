@@ -40,7 +40,9 @@ import org.apache.pinot.common.data.FieldSpec;
 import org.apache.pinot.common.data.MetricFieldSpec;
 import org.apache.pinot.common.data.Schema;
 import org.apache.pinot.common.data.TimeFieldSpec;
+import org.apache.pinot.common.data.TimeGranularitySpec;
 import org.apache.pinot.core.data.GenericRow;
+import org.apache.pinot.core.data.readers.RecordReaderUtils;
 
 
 public class AvroUtils {
@@ -277,12 +279,34 @@ public class AvroUtils {
    */
   public static void fillGenericRow(GenericRecord from, GenericRow to, Schema schema) {
     for (FieldSpec fieldSpec : schema.getAllFieldSpecs()) {
-      String fieldName = fieldSpec.getName();
-      Object avroValue = from.get(fieldName);
-      if (fieldSpec.isSingleValueField()) {
-        to.putField(fieldName, transformAvroValueToObject(avroValue, fieldSpec));
+      if (fieldSpec.getFieldType() == FieldSpec.FieldType.TIME) {
+        // For TIME field spec, if incoming and outgoing time column name are the same, use incoming field spec to fill
+        // the row; otherwise, fill both incoming and outgoing time column
+        TimeFieldSpec timeFieldSpec = (TimeFieldSpec) fieldSpec;
+        String incomingTimeColumnName = timeFieldSpec.getIncomingTimeColumnName();
+        Object incomingTimeAvroValue = from.get(incomingTimeColumnName);
+        if (incomingTimeAvroValue != null) {
+          // Treat incoming time column as a single-valued dimension column
+          TimeGranularitySpec incomingGranularitySpec = timeFieldSpec.getIncomingGranularitySpec();
+          to.putField(incomingTimeColumnName, transformAvroValueToObject(incomingTimeAvroValue,
+              new DimensionFieldSpec(incomingTimeColumnName, incomingGranularitySpec.getDataType(), true)));
+        }
+        // Fill outgoing time column if its name is not the same as incoming time column
+        String outgoingTimeColumnName = timeFieldSpec.getOutgoingTimeColumnName();
+        if (!outgoingTimeColumnName.equals(incomingTimeColumnName)) {
+          Object outgoingTimeAvroValue = from.get(outgoingTimeColumnName);
+          if (outgoingTimeAvroValue != null) {
+            to.putField(outgoingTimeColumnName, transformAvroValueToObject(outgoingTimeAvroValue, timeFieldSpec));
+          }
+        }
       } else {
-        to.putField(fieldName, transformAvroArrayToObjectArray((GenericData.Array) avroValue, fieldSpec));
+        String fieldName = fieldSpec.getName();
+        Object avroValue = from.get(fieldName);
+        if (fieldSpec.isSingleValueField()) {
+          to.putField(fieldName, transformAvroValueToObject(avroValue, fieldSpec));
+        } else {
+          to.putField(fieldName, transformAvroArrayToObjectArray((GenericData.Array) avroValue, fieldSpec));
+        }
       }
     }
   }
@@ -290,25 +314,29 @@ public class AvroUtils {
   /**
    * Transform a single-value Avro value into an object in Pinot format.
    */
-  public static Object transformAvroValueToObject(Object avroValue, FieldSpec fieldSpec) {
+  public static Object transformAvroValueToObject(@Nullable Object avroValue, FieldSpec fieldSpec) {
     if (avroValue == null) {
       return fieldSpec.getDefaultNullValue();
     }
     if (avroValue instanceof GenericData.Record) {
       return transformAvroValueToObject(((GenericData.Record) avroValue).get(0), fieldSpec);
     }
-    if (fieldSpec.getDataType() == FieldSpec.DataType.STRING) {
-      return avroValue.toString();
-    } else if (fieldSpec.getDataType() == FieldSpec.DataType.BYTES && avroValue instanceof ByteBuffer) {
-      // Avro ByteBuffer maps to byte[].
-      ByteBuffer byteBuffer = (ByteBuffer) avroValue;
+    if (fieldSpec.getDataType() == FieldSpec.DataType.BYTES) {
+      // Avro ByteBuffer maps to byte[]
+      if (avroValue instanceof ByteBuffer) {
+        ByteBuffer byteBuffer = (ByteBuffer) avroValue;
 
-      // Assumes byte-buffer is ready to read. Also, avoid getting underlying array, as it may be over-sized.
-      byte[] bytes = new byte[byteBuffer.remaining()];
-      byteBuffer.get(bytes);
-      return bytes;
+        // Use byteBuffer.remaining() instead of byteBuffer.capacity() so that it still works when buffer is over-sized
+        byte[] bytes = new byte[byteBuffer.remaining()];
+        byteBuffer.get(bytes);
+        return bytes;
+      } else {
+        Preconditions.checkState(avroValue instanceof byte[], "Avro value must be ByteBuffer or byte[] for BYTES type");
+        return avroValue;
+      }
+    } else {
+      return RecordReaderUtils.convertToDataType(avroValue.toString(), fieldSpec);
     }
-    return avroValue;
   }
 
   /**

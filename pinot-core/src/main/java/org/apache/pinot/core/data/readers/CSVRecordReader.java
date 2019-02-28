@@ -25,8 +25,11 @@ import org.apache.commons.csv.CSVFormat;
 import org.apache.commons.csv.CSVParser;
 import org.apache.commons.csv.CSVRecord;
 import org.apache.commons.lang.StringUtils;
+import org.apache.pinot.common.data.DimensionFieldSpec;
 import org.apache.pinot.common.data.FieldSpec;
 import org.apache.pinot.common.data.Schema;
+import org.apache.pinot.common.data.TimeFieldSpec;
+import org.apache.pinot.common.data.TimeGranularitySpec;
 import org.apache.pinot.core.data.GenericRow;
 
 
@@ -110,18 +113,37 @@ public class CSVRecordReader implements RecordReader {
     CSVRecord record = _iterator.next();
 
     for (FieldSpec fieldSpec : _schema.getAllFieldSpecs()) {
-      String column = fieldSpec.getName();
-      String token = record.isSet(column) ? record.get(column) : null;
-
-      Object value;
-      if (fieldSpec.isSingleValueField()) {
-        value = RecordReaderUtils.convertToDataType(token, fieldSpec);
+      if (fieldSpec.getFieldType() == FieldSpec.FieldType.TIME) {
+        // For TIME field spec, if incoming and outgoing time column name are the same, use incoming field spec to fill
+        // the row; otherwise, fill both incoming and outgoing time column
+        TimeFieldSpec timeFieldSpec = (TimeFieldSpec) fieldSpec;
+        String incomingTimeColumnName = timeFieldSpec.getIncomingTimeColumnName();
+        String incomingTimeToken = record.isSet(incomingTimeColumnName) ? record.get(incomingTimeColumnName) : null;
+        if (incomingTimeToken != null) {
+          // Treat incoming time column as a single-valued dimension column
+          TimeGranularitySpec incomingGranularitySpec = timeFieldSpec.getIncomingGranularitySpec();
+          reuse.putField(incomingTimeColumnName, RecordReaderUtils.convertToDataType(incomingTimeToken,
+              new DimensionFieldSpec(incomingTimeColumnName, incomingGranularitySpec.getDataType(), true)));
+        }
+        // Fill outgoing time column if its name is not the same as incoming time column
+        String outgoingTimeColumnName = timeFieldSpec.getOutgoingTimeColumnName();
+        if (!outgoingTimeColumnName.equals(incomingTimeColumnName)) {
+          String outgoingTimeToken = record.isSet(outgoingTimeColumnName) ? record.get(outgoingTimeColumnName) : null;
+          if (outgoingTimeToken != null) {
+            reuse.putField(outgoingTimeColumnName,
+                RecordReaderUtils.convertToDataType(outgoingTimeToken, timeFieldSpec));
+          }
+        }
       } else {
-        String[] tokens = token != null ? StringUtils.split(token, _multiValueDelimiter) : null;
-        value = RecordReaderUtils.convertToDataTypeArray(tokens, fieldSpec);
+        String fieldName = fieldSpec.getName();
+        String token = record.isSet(fieldName) ? record.get(fieldName) : null;
+        if (fieldSpec.isSingleValueField()) {
+          reuse.putField(fieldName, RecordReaderUtils.convertToDataType(token, fieldSpec));
+        } else {
+          String[] tokens = token != null ? StringUtils.split(token, _multiValueDelimiter) : null;
+          reuse.putField(fieldName, RecordReaderUtils.convertToDataTypeArray(tokens, fieldSpec));
+        }
       }
-
-      reuse.putField(column, value);
     }
 
     return reuse;
